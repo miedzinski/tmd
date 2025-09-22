@@ -125,7 +125,7 @@ def send_message(session, webhook_url: str, content: str, file: tuple[str, Bytes
     files = {}
     if file:
         files["file"] = file
-    payload = {"content": content}
+    payload = {"content": f"@everyone {content}", "allowed_mentions": {"parse": ["everyone"]}}
     response = session.post(webhook_url, data={"payload_json": json.dumps(payload)}, files=files)
     response.raise_for_status()
 
