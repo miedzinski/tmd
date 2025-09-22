@@ -7,6 +7,8 @@
 
 from datetime import date, datetime
 from glob import glob
+from io import BytesIO
+import json
 import os.path
 from tempfile import NamedTemporaryFile
 import shutil
@@ -24,7 +26,8 @@ USER_AGENT = "tmd/1.0 (+https://github.com/miedzinski/tmd)"
 class Database(BaseModel):
     username: int
     password: str
-    charges: list["Charge"] = Field(default_factory=list)
+    discord_webhook_url: str | None = None
+    settlements: list["Settlement"] = Field(default_factory=list)
     payments: list["Payment"] = Field(default_factory=list)
 
 
@@ -32,8 +35,10 @@ class FrozenModel(BaseModel):
     model_config = ConfigDict(frozen=True)
 
 
-class Charge(FrozenModel):
+class Settlement(FrozenModel):
     id: int | None = None
+    year: int
+    period: int
     title: str
     due_date: date
     value: float
@@ -62,9 +67,9 @@ def fetch_wid(session) -> int:
     return response.json()[0][6][0][1]
 
 
-def fetch_records(session, wid) -> tuple[list[Charge], list[Payment]]:
+def fetch_records(session, wid) -> tuple[list[Settlement], list[Payment]]:
     this_year = date.today().year
-    charges = []
+    settlements = []
     payments = []
 
     for year in range(this_year, this_year - 30, -1):
@@ -77,9 +82,11 @@ def fetch_records(session, wid) -> tuple[list[Charge], list[Payment]]:
 
         for month in response_data:
             for record in month[2]:
-                charges.append(
-                    Charge(
+                settlements.append(
+                    Settlement(
                         id=record[4],
+                        year=year,
+                        period=record[3],
                         title=record[1],
                         due_date=datetime.fromisoformat(record[0]).date(),
                         value=-record[2],
@@ -94,7 +101,7 @@ def fetch_records(session, wid) -> tuple[list[Charge], list[Payment]]:
                     )
                 )
 
-    return charges, payments
+    return settlements, payments
 
 
 def diff[T](seen: list[T], new: list[T]) -> list[T]:
@@ -102,9 +109,43 @@ def diff[T](seen: list[T], new: list[T]) -> list[T]:
     return [x for x in new if x not in seen_set]
 
 
-def notify(charges, payments):
-    print("New charges:", charges)
-    print("New payments:", payments)
+def download_document(session, settlement: Settlement, wid: int) -> tuple[str, BytesIO, str]:
+    payload = {
+        "WId": wid,
+        "Rok": settlement.year,
+        "NTId": settlement.period,
+        "rId": settlement.id,
+    }
+    response = session.post(API_URL + "/WydrukDokument", json=payload)
+    response.raise_for_status()
+    return settlement.title + ".pdf", BytesIO(response.content), "application/pdf"
+
+
+def send_message(session, webhook_url: str, content: str, file: tuple[str, BytesIO, str] | None = None) -> None:
+    files = {}
+    if file:
+        files["file"] = file
+    payload = {"content": content}
+    response = session.post(webhook_url, data={"payload_json": json.dumps(payload)}, files=files)
+    response.raise_for_status()
+
+
+def notify(tmd_session, settlements: list[Settlement], payments: list[Payment], wid: int, discord_webhook_url: str):
+    with requests.Session() as discord_session:
+        discord_session.headers.update({"User-Agent": USER_AGENT})
+        for settlement in settlements:
+            send_message(
+                session=discord_session,
+                webhook_url=discord_webhook_url,
+                content=f"📢 You have a new settlement: **{settlement.title}**\nAmount: **{settlement.value:.2f} PLN**\nDue date: **{settlement.due_date.strftime('%d %b %Y')}**",
+                file=download_document(tmd_session, settlement, wid),
+            )
+        for payment in payments:
+            send_message(
+                session=discord_session,
+                webhook_url=discord_webhook_url,
+                content=f"💸 New payment recorded!\nAmount: **{payment.value:.2f} PLN**\nDate: **{payment.date.strftime('%d %b %Y')}**",
+            )
 
 
 def save(db_path, db):
@@ -114,22 +155,21 @@ def save(db_path, db):
     shutil.move(tmp_path, db_path)
 
 
-def sync_account(db):
+def sync_account(db: Database):
     with requests.Session() as session:
         session.headers.update({"User-Agent": USER_AGENT})
 
         login(session, db.username, db.password)
 
         wid = fetch_wid(session)
-        charges, payments = fetch_records(session, wid)
+        settlements, payments = fetch_records(session, wid)
 
-    new_charges = diff(db.charges, charges)
-    new_payments = diff(db.payments, payments)
+        if db.discord_webhook_url:
+            new_settlements = diff(db.settlements, settlements)
+            new_payments = diff(db.payments, payments)
+            notify(session, new_settlements, new_payments, wid, db.discord_webhook_url)
 
-    if new_charges or new_payments:
-        notify(new_charges, new_payments)
-
-    db.charges = charges
+    db.settlements = settlements
     db.payments = payments
 
 
