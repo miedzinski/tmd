@@ -104,6 +104,12 @@ def fetch_records(session, wid) -> tuple[list[Settlement], list[Payment]]:
     return settlements, payments
 
 
+def fetch_balance(session, wid: int) -> float:
+    response = session.post(API_URL + "/Rozliczenia", json=wid)
+    response.raise_for_status()
+    return response.json()[0][2]
+
+
 def diff[T](seen: list[T], new: list[T]) -> list[T]:
     seen_set = set(seen)
     return [x for x in new if x not in seen_set]
@@ -130,7 +136,14 @@ def send_message(session, webhook_url: str, content: str, file: tuple[str, Bytes
     response.raise_for_status()
 
 
-def notify(tmd_session, settlements: list[Settlement], payments: list[Payment], wid: int, discord_webhook_url: str):
+def notify(
+    tmd_session,
+    settlements: list[Settlement],
+    payments: list[Payment],
+    balance: float,
+    wid: int,
+    discord_webhook_url: str,
+):
     with requests.Session() as discord_session:
         discord_session.headers.update({"User-Agent": USER_AGENT})
         for settlement in settlements:
@@ -145,6 +158,12 @@ def notify(tmd_session, settlements: list[Settlement], payments: list[Payment], 
                 session=discord_session,
                 webhook_url=discord_webhook_url,
                 content=f"💸 New payment recorded!\nAmount: **{payment.value:.2f} PLN**\nDate: **{payment.date.strftime('%d %b %Y')}**",
+            )
+        if settlements or payments:
+            send_message(
+                session=discord_session,
+                webhook_url=discord_webhook_url,
+                content=f"💰 Current balance: **{balance:.2f} PLN**",
             )
 
 
@@ -163,11 +182,12 @@ def sync_account(db: Database):
 
         wid = fetch_wid(session)
         settlements, payments = fetch_records(session, wid)
+        balance = fetch_balance(session, wid)
 
         if db.discord_webhook_url:
             new_settlements = diff(db.settlements, settlements)
             new_payments = diff(db.payments, payments)
-            notify(session, new_settlements, new_payments, wid, db.discord_webhook_url)
+            notify(session, new_settlements, new_payments, balance, wid, db.discord_webhook_url)
 
     db.settlements = settlements
     db.payments = payments
