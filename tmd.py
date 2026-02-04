@@ -77,8 +77,10 @@ def fetch_records(session, wid) -> tuple[list[Settlement], list[Payment]]:
         response.raise_for_status()
         response_data = response.json()
 
-        if not response_data and year != this_year:
-            break
+        if not response_data:
+            if year != this_year:
+                break
+            continue
 
         for month in response_data:
             for record in month[2]:
